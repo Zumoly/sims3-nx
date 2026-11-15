@@ -13,8 +13,7 @@ are drawn directly with the Switch GPU's own API, [deko3d](https://github.com/de
 
 > [!IMPORTANT]
 > **No game files are included.** You need your own Xbox 360 copy of The Sims 3, **USA/Europe disc
-> (En, Fr, De, Es, It, Nl; media ID 21CDDF46)**, and its **Title Update 1**. Other versions will not run, because the
-> port contains code translated from these exact executables. This project does not host or link to game data.
+> (En, Fr, De, Es, It, Nl; media ID 21CDDF46)**, and its **Title Update 1**. Other versions will not run. This project does not host or link to game data.
 
 ## What you need
 
@@ -92,11 +91,10 @@ Working on hardware: the main menu, Create a Sim, the neighbourhood and lots, sa
 
 Known issues:
 
-- Crackling sound on some voices, TV and radio.
 - Busy scenes drop to the high teens.
 - Outfit thumbnails can glitch the first time a category is opened.
 - Returning to the main menu from a game can crash.
-- Some interface elements (moodlet frames, skill bars) show small drawing errors.
+- Some interface elements (skill bars) show small drawing errors.
 
 Bug reports are welcome in [Issues](../../issues): include the latest log from `sdmc:/switch/Sims3/logs/`, a
 screenshot, and what you were doing.

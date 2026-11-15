@@ -1,0 +1,4 @@
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libx11-xcb1 libx11-6 libxcb1 libwayland-client0 libstdc++6 python3 \
+    && rm -rf /var/lib/apt/lists/*

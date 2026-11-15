@@ -1,0 +1,12 @@
+release/
+work/
+app/generated/
+third_party/
+game/
+update/
+*.nro
+*.xex
+*.xexp
+*.iso
+*.log
+__pycache__/

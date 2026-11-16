@@ -30,6 +30,7 @@
 #include <fmt/xchar.h>
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #if defined(__SWITCH__)
@@ -440,3 +441,62 @@ REX_EXPORT(__imp__XamFree, rex::kernel::xam::XamFree_entry)
 REX_EXPORT(__imp__XamQueryLiveHiveW, rex::kernel::xam::XamQueryLiveHiveW_entry)
 REX_EXPORT(__imp__XamLoaderGetDvdTrayState, rex::kernel::xam::XamLoaderGetDvdTrayState_entry)
 REX_EXPORT(__imp__XamSwapDisc, rex::kernel::xam::XamSwapDisc_entry)
+
+#if defined(__SWITCH__)
+// Sims3-NX menu (app/src/deko3d_graphics.cpp, hold MINUS): the game's language. The game reads it once at start
+// (XGetLanguage), so a change is saved to sims3.toml beside the NRO and the NRO is loaded again, as above.
+namespace rex {
+namespace kernel {
+namespace xam {
+extern "C" uint32_t Sims3CurrentLanguage() { return REXCVAR_GET(user_language); }
+
+// Returns 0 when the setting was saved but this NRO cannot be loaded again (no hbloader argv); otherwise it
+// does not return.
+extern "C" int Sims3RelaunchWithLanguage(uint32_t language) {
+  std::string toml = "sdmc:/switch/Sims3/sims3.toml";
+  const bool can_relaunch = __system_argv && __system_argv[0] && __system_argv[0][0];
+  if (can_relaunch) {
+    const std::string path = __system_argv[0];
+    const size_t slash = path.find_last_of('/');
+    if (slash != std::string::npos) toml = path.substr(0, slash + 1) + "sims3.toml";
+  }
+  // Every other line of the file is kept; user_language goes first, ahead of any [section].
+  std::string kept;
+  if (FILE* f = std::fopen(toml.c_str(), "rb")) {
+    char line[1024];
+    while (std::fgets(line, sizeof(line), f)) {
+      const char* p = line;
+      while (*p == ' ' || *p == '\t') ++p;
+      if (std::strncmp(p, "user_language", 13) == 0) continue;
+      kept += line;
+    }
+    std::fclose(f);
+  }
+  if (!kept.empty() && kept.back() != '\n') kept += '\n';
+  if (FILE* f = std::fopen(toml.c_str(), "wb")) {
+    const std::string text = fmt::format("user_language = {}\n", language) + kept;
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
+  }
+  REXKRNL_INFO("[language] {} saved to {}, relaunching: {}", language, toml, can_relaunch);
+  if (!can_relaunch) return 0;
+  std::remove(RelaunchFile().c_str());  // a plain start, not a return to the main menu with launch data
+  envSetNextLoad(__system_argv[0], __system_argv[0]);
+  {
+    const RexSwitchHandle self = RexSwitchHandleFor(pthread_self());
+    auto threads = REX_KERNEL_OBJECTS()->GetObjectsByType<rex::system::XThread>();
+    for (auto& thread : threads) {
+      if (!thread->thread()) continue;
+      const RexSwitchHandle handle =
+          RexSwitchHandleFor(reinterpret_cast<pthread_t>(thread->thread()->native_handle()));
+      if (handle == REX_SWITCH_INVALID_HANDLE || handle == self) continue;
+      svcSetThreadActivity(handle, 1);
+    }
+  }
+  rex::FlushLogging();
+  _exit(0);
+}
+}  // namespace xam
+}  // namespace kernel
+}  // namespace rex
+#endif

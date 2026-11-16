@@ -27,7 +27,7 @@ mkdir -p /b/src/app
 cp /nx/app/CMakeLists.txt /nx/app/icon.jpg /b/src/app/
 rm -rf /b/src/app/src
 cp -r /nx/app/src /b/src/app/src
-echo "#define SIMS3_TITLE_UPDATE ${TU:-0}" > /b/src/app/src/sims3_build.h
+printf '#define SIMS3_TITLE_UPDATE %s\n#define SIMS3_CHEATS %s\n' "${TU:-0}" "${CHEATS:-0}" > /b/src/app/src/sims3_build.h  # CHEATS=1 adds the cheat menu
 sh /nx/tools/docker/build_shaders.sh /b/src/app/src/sims3_ui_shaders.h
 if [ ! -f /b/src/app/generated/.copied ] || [ "$GEN/default/codegen.stamp" -nt /b/src/app/generated/.copied ]; then
   rm -rf /b/src/app/generated

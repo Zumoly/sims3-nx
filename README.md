@@ -26,7 +26,7 @@ are drawn directly with the Switch GPU's own API, [deko3d](https://github.com/de
 
 ## How to install
 
-1. Download `sims3-nx-v0.1.0.zip` from the [Releases](../../releases) page and extract it to the root of your
+1. Download the latest `sims3-nx-v0.1.1.zip` from the [Releases](../../releases) page and extract it to the root of your
    SD card. You get `sdmc:/switch/Sims3/sims3.nro` with empty `game/` and `update/` folders.
 2. Copy your **whole extracted disc** into `sdmc:/switch/Sims3/game/`, so that `default.xex` is at
    `sdmc:/switch/Sims3/game/default.xex`.
@@ -89,8 +89,14 @@ The frame rate is capped at **30 fps** for smoother pacing. To change the cap, p
 
 ## Language
 
-The game uses the language of the (emulated) Xbox 360 system settings, English by default. To change it, create a
-text file named `sims3.toml` next to `sims3.nro` with one line, for example for French:
+The game uses the language of the (emulated) Xbox 360 system settings, English by default. To change it in the
+game, **hold − (minus) for half a second**, on the main menu or while playing: a menu opens. Go to **Language**,
+pick one with Left / Right and press **A**. The port saves the choice and restarts the game in that language, so
+save your game first. A short "Hold − Language" note shows in the bottom corner after the game starts.
+A quick tap of − is still the game's own Back button.
+
+The choice is stored in a text file named `sims3.toml` next to `sims3.nro`. You can also write it by hand, one line,
+for example for French:
 
 ```
 user_language = 4
@@ -142,7 +148,8 @@ Then:
    environment we use; `tools/post_codegen.py` applies the port's fix-ups.
 2. Put the game's shader microcode (captured from the running game) into `work/ucode/`. At build time `tools/xenos2glsl.py` translates it to GLSL
    and `uam` compiles it for deko3d.
-3. Build: `docker run --rm -v "$PWD:/nx" -v sims3-build-tu:/b devkitpro/devkita64 sh /nx/tools/docker/build_app.sh full`.
+3. Build: `docker run --rm -v "$PWD:/nx" -v sims3-build-tu:/b devkitpro/devkita64 sh /nx/tools/docker/build_app.sh full`. Add `-e CHEATS=1` to the `docker run` for a
+   build whose − menu can also turn on the game's built-in cheats; the release is built without.
 
 The interesting parts are `app/src/deko3d_graphics.cpp` (the Xenos-to-deko3d renderer: PM4 command processing,
 EDRAM and resolves, tiled textures and mip chains, and the shader translation glue) and `sdk_overlay/` (changes

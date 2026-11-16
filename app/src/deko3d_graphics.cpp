@@ -51,6 +51,424 @@
 extern "C" char _start;
 extern "C" uint32_t RexSwitchHandleFor(pthread_t thread);  // sdk/src/core/threading_switch.h
 
+// Cheat menu (the user's request, 11-16): holding MINUS shows the game's own cheats and how to reach them. The
+// console game has them built in (scripts: Cheat_Kaching, Cheat_Motherlode, CheatLlama, CheatSetSkillProgress...),
+// turned on by holding LB + RB + LT + RT; the menu can hold those four for the player. The input driver
+// (sdk_overlay/src/input/switch/switch_input_driver.cpp) calls Sims3CheatPad for player 1 and Sims3CheatShoulders
+// when it builds the game's pad state; the presenter draws the panel over each frame (DrawOverlay).
+#define STB_TRUETYPE_IMPLEMENTATION
+#define STBTT_STATIC
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#include "stb_truetype.h"
+#pragma GCC diagnostic pop
+extern "C" const uint8_t default_font_bin[];  // libnx's console font: 256 glyphs, 16x16 cells, each an 8x8 doubled
+
+#if __has_include("sims3_build.h")
+#include "sims3_build.h"
+#endif
+#ifndef SIMS3_CHEATS
+#define SIMS3_CHEATS 1  // 0: the "normal" NRO, whose menu only has Language and Close
+#endif
+
+namespace cheat_menu {
+constexpr uint64_t kHintNs = 240000000000ull;     // the "Hold - : Language" note shows this long after start
+constexpr uint64_t kHoldNs = 500000000ull;        // MINUS held this long opens the menu
+constexpr uint64_t kTapNs = 120000000ull;         // a shorter press reaches the game as Back for this long
+constexpr uint64_t kShouldersNs = 1500000000ull;  // the four shoulder buttons held this long: UI events for the game
+// Rows: 0 turn cheats on, 1 language, 2 close; the normal NRO starts at row 1.
+constexpr int kFirst = SIMS3_CHEATS ? 0 : 1;
+constexpr int kItems = 3 - kFirst;
+
+// The game's languages (XLanguage values for user_language), named in their own language; Latin-1 bytes, as
+// Canvas::Text draws one byte per character.
+struct Language {
+  uint32_t id;
+  const char* name;
+};
+constexpr Language kLanguages[] = {
+    {1, "English"}, {3, "Deutsch"}, {4, "Franç" "ais"}, {5, "Españ" "ol"}, {6, "Italiano"},
+};
+constexpr int kLanguageCount = int(sizeof(kLanguages) / sizeof(kLanguages[0]));
+
+std::atomic<bool> open{false};
+std::atomic<int> selection{0};
+std::atomic<uint32_t> version{1};
+std::atomic<uint64_t> shoulders_until{0};
+// Set by "Turn cheats on"; the renderer (PokeCheats) then sets the game's cheat-combination bits in guest memory.
+std::atomic<bool> enable_request{false};
+// Guest memory, for PokeCheats (set by the command processor once it starts).
+std::atomic<rex::memory::Memory*> guest_memory{nullptr};
+std::atomic<int> language{0};          // index in kLanguages shown on the Language row
+std::atomic<int> running_language{0};  // the one the game started with
+std::atomic<bool> restart_failed{false};
+// The note at the bottom of the screen from start (the main menu) until + is pressed, the menu opens, or kHintNs.
+std::atomic<uint64_t> hint_until{0};
+std::atomic<bool> hint_done{false};
+
+// Input thread only.
+uint64_t previous = 0, minus_since = 0, tap_until = 0;
+bool minus_before = false, wait_release = false;
+
+uint64_t Now() { return armTicksToNs(armGetSystemTick()); }
+}  // namespace cheat_menu
+
+extern "C" uint32_t Sims3CurrentLanguage();                 // sdk_overlay/src/kernel/xam/xam_info.cpp
+extern "C" int Sims3RelaunchWithLanguage(uint32_t language);  // saves sims3.toml, loads the NRO again
+
+namespace cheat_menu {
+int LanguageIndex(uint32_t id) {
+  for (int i = 0; i < kLanguageCount; ++i)
+    if (kLanguages[i].id == id) return i;
+  return 0;
+}
+
+int Item() { return selection + kFirst; }
+
+void Close() {
+  open = false;
+  ++version;
+  wait_release = true;
+}
+
+uint64_t Pad(uint64_t held) {
+  constexpr uint64_t kSwallow = uint64_t(1) << 63;
+  const uint64_t now = Now();
+  const uint64_t pressed = held & ~previous;
+  previous = held;
+  if (wait_release) {  // nothing reaches the game or the menu until every button is up
+    if (held) return kSwallow;
+    wait_release = false;
+    minus_before = false;
+  }
+  if (open) {
+    const int s = selection;
+    if (pressed & (HidNpadButton_Up | HidNpadButton_StickLUp)) selection = (s + kItems - 1) % kItems;
+    if (pressed & (HidNpadButton_Down | HidNpadButton_StickLDown)) selection = (s + 1) % kItems;
+    if (selection != s) ++version;
+    if (Item() == 1) {
+      const int l = language;
+      if (pressed & (HidNpadButton_Left | HidNpadButton_StickLLeft)) language = (l + kLanguageCount - 1) % kLanguageCount;
+      if (pressed & (HidNpadButton_Right | HidNpadButton_StickLRight)) language = (l + 1) % kLanguageCount;
+      if (language != l) ++version;
+    }
+    if ((pressed & HidNpadButton_A) && Item() == 1) {
+      if (language != running_language) {
+        REXLOG_INFO("[language] {} chosen, restarting", kLanguages[language.load()].id);
+        if (!Sims3RelaunchWithLanguage(kLanguages[language.load()].id)) {
+          restart_failed = true;
+          ++version;
+        }
+      } else {
+        Close();
+      }
+    } else if (pressed & HidNpadButton_A) {
+      if (Item() == 0) {
+        shoulders_until = now + kShouldersNs;
+        enable_request = true;
+        REXLOG_INFO("[cheats] turn on requested");
+      }
+      Close();
+    } else if (pressed & (HidNpadButton_B | HidNpadButton_Minus)) {
+      Close();
+    }
+    return kSwallow;
+  }
+  if ((pressed & HidNpadButton_Plus) && !hint_done) hint_done = true;
+  const bool minus = (held & HidNpadButton_Minus) != 0;
+  held &= ~uint64_t(HidNpadButton_Minus);
+  if (minus && !minus_before) minus_since = now;
+  if (minus && minus_since && now - minus_since >= kHoldNs) {
+    minus_since = 0;
+    minus_before = true;
+    selection = 0;
+    running_language = LanguageIndex(Sims3CurrentLanguage());
+    language = running_language.load();
+    restart_failed = false;
+    hint_done = true;
+    open = true;
+    ++version;
+    wait_release = true;  // the menu starts taking buttons once MINUS is let go
+    REXLOG_INFO("[cheats] menu opened");
+    return kSwallow;
+  }
+  if (!minus && minus_before && minus_since) tap_until = now + kTapNs;
+  if (!minus) minus_since = 0;
+  minus_before = minus;
+  if (now < tap_until) held |= HidNpadButton_Minus;
+  return held;
+}
+
+bool Shoulders() { return Now() < shoulders_until.load(); }
+
+// What the overlay shows: 0 nothing; otherwise a value that changes whenever the picture does.
+bool Hint() {
+  if (hint_done) return false;
+  uint64_t until = hint_until;
+  if (!until) hint_until = until = Now() + kHintNs;  // the first frame
+  if (Now() < until) return true;
+  hint_done = true;
+  return false;
+}
+
+uint64_t Key() {
+  if (open) return (uint64_t(1) << 40) | version.load();
+  if (Shoulders()) return uint64_t(1) << 41;
+  if (Hint()) return uint64_t(1) << 42;
+  return 0;
+}
+
+// The Switch's own system font (pl service, TrueType) drawn with stb_truetype (app/src/stb_truetype.h, public
+// domain, the copy SpellJam-NX uses). Glyph coverage is cached per size; libnx's bitmap font is the fallback.
+namespace font {
+stbtt_fontinfo info;
+int state = 0;  // 0 not tried, 1 ready, -1 unavailable
+struct Glyph {
+  int width = 0, height = 0, x = 0, y = 0;
+  float advance = 0;
+  std::vector<uint8_t> coverage;
+};
+std::unordered_map<uint32_t, Glyph> glyphs;  // size << 16 | character
+
+bool Ready() {
+  if (state) return state > 0;
+  state = -1;
+  if (R_FAILED(plInitialize(PlServiceType_User))) {
+    REXLOG_WARN("[cheats] system font: pl unavailable, bitmap font used");
+    return false;
+  }
+  PlFontData data;
+  if (R_FAILED(plGetSharedFontByType(&data, PlSharedFontType_Standard)) ||
+      !stbtt_InitFont(&info, static_cast<const uint8_t*>(data.address),
+                      stbtt_GetFontOffsetForIndex(static_cast<const uint8_t*>(data.address), 0))) {
+    REXLOG_WARN("[cheats] system font unavailable, bitmap font used");
+    return false;
+  }
+  state = 1;
+  REXLOG_INFO("[cheats] system font loaded, {} bytes", data.size);
+  return true;
+}
+
+const Glyph& Get(int size, uint32_t ch) {
+  Glyph& g = glyphs[(uint32_t(size) << 16) | ch];
+  if (g.advance == 0) {
+    const float scale = stbtt_ScaleForPixelHeight(&info, float(size));
+    int advance = 0, bearing = 0;
+    stbtt_GetCodepointHMetrics(&info, int(ch), &advance, &bearing);
+    g.advance = std::max(advance * scale, 1.0f);
+    int x0, y0, x1, y1;
+    stbtt_GetCodepointBitmapBox(&info, int(ch), scale, scale, &x0, &y0, &x1, &y1);
+    g.width = std::max(x1 - x0, 0);
+    g.height = std::max(y1 - y0, 0);
+    g.x = x0;
+    g.y = y0;
+    g.coverage.assign(size_t(g.width) * g.height, 0);
+    if (g.width && g.height) {
+      stbtt_MakeCodepointBitmap(&info, g.coverage.data(), g.width, g.height, g.width, scale, scale, int(ch));
+    }
+  }
+  return g;
+}
+
+int Ascent(int size) {
+  int ascent, descent, gap;
+  stbtt_GetFontVMetrics(&info, &ascent, &descent, &gap);
+  return int(ascent * stbtt_ScaleForPixelHeight(&info, float(size)) + 0.5f);
+}
+}  // namespace font
+
+struct Canvas {
+  uint32_t* pixels;
+  uint32_t width, height;
+
+  static uint32_t Rgba(uint32_t r, uint32_t g, uint32_t b, uint32_t a) { return r | (g << 8) | (b << 16) | (a << 24); }
+
+  // Source over, with alpha kept so the presenter can blend the result over the game.
+  void Blend(int x, int y, uint32_t colour, uint32_t cover) {
+    if (x < 0 || y < 0 || x >= int(width) || y >= int(height) || !cover) return;
+    uint32_t& d = pixels[size_t(y) * width + x];
+    const uint32_t a = ((colour >> 24) * cover + 127) / 255;
+    const uint32_t inv = 255 - a;
+    uint32_t out = 0;
+    for (int c = 0; c < 3; ++c) {
+      const uint32_t s = (colour >> (c * 8)) & 255, t = (d >> (c * 8)) & 255;
+      out |= ((s * a + t * inv + 127) / 255) << (c * 8);
+    }
+    const uint32_t da = d >> 24;
+    out |= (a + (da * inv + 127) / 255) << 24;
+    d = out;
+  }
+
+  void Fill(int x0, int y0, int x1, int y1, uint32_t colour) {
+    for (int y = std::max(y0, 0); y < std::min(y1, int(height)); ++y)
+      for (int x = std::max(x0, 0); x < std::min(x1, int(width)); ++x) Blend(x, y, colour, 255);
+  }
+
+  // A rectangle with rounded corners, the edge anti-aliased.
+  void Round(int x0, int y0, int x1, int y1, int radius, uint32_t colour) {
+    for (int y = std::max(y0, 0); y < std::min(y1, int(height)); ++y) {
+      for (int x = std::max(x0, 0); x < std::min(x1, int(width)); ++x) {
+        const float cx = float(std::clamp(x, x0 + radius, x1 - 1 - radius));
+        const float cy = float(std::clamp(y, y0 + radius, y1 - 1 - radius));
+        const float dx = float(x) - cx, dy = float(y) - cy;
+        const float d = std::sqrt(dx * dx + dy * dy) - float(radius) + 0.5f;
+        const float cover = std::clamp(1.0f - d, 0.0f, 1.0f);
+        Blend(x, y, colour, uint32_t(cover * 255.0f + 0.5f));
+      }
+    }
+  }
+
+  void Circle(int cx, int cy, int r, uint32_t colour) { Round(cx - r, cy - r, cx + r, cy + r, r, colour); }
+
+  // y is the top of the line; size is the font's pixel height. Returns the width drawn.
+  int Text(int x, int y, const char* text, uint32_t colour, int size = 22) {
+    if (font::Ready()) {
+      const int baseline = y + font::Ascent(size);
+      const float scale = stbtt_ScaleForPixelHeight(&font::info, float(size));
+      float pen = float(x);
+      for (const char* s = text; *s; ++s) {
+        const font::Glyph& g = font::Get(size, uint8_t(*s));
+        const int gx = int(pen + 0.5f) + g.x, gy = baseline + g.y;
+        for (int row = 0; row < g.height; ++row)
+          for (int column = 0; column < g.width; ++column)
+            Blend(gx + column, gy + row, colour, g.coverage[size_t(row) * g.width + column]);
+        pen += g.advance;
+        if (s[1]) pen += stbtt_GetCodepointKernAdvance(&font::info, uint8_t(s[0]), uint8_t(s[1])) * scale;
+      }
+      return int(pen + 0.5f) - x;
+    }
+    // Fallback: libnx's console font, every other row and column of its 16x16 cells, leftmost pixel in bit 15.
+    const int scale = std::max(size / 10, 1);
+    const int start = x;
+    for (const char* s = text; *s; ++s, x += 8 * scale) {
+      const uint8_t* glyph = default_font_bin + uint32_t(uint8_t(*s)) * 32;
+      for (int row = 0; row < 8; ++row) {
+        const uint32_t bits = glyph[row * 4] | (uint32_t(glyph[row * 4 + 1]) << 8);
+        for (int column = 0; column < 8; ++column)
+          if ((bits >> (15 - column * 2)) & 1)
+            Fill(x + column * scale, y + row * scale, x + (column + 1) * scale, y + (row + 1) * scale, colour);
+      }
+    }
+    return x - start;
+  }
+
+  int Width(const char* text, int size = 22) {
+    if (!font::Ready()) return int(std::strlen(text)) * 8 * std::max(size / 10, 1);
+    float pen = 0;
+    for (const char* s = text; *s; ++s) pen += font::Get(size, uint8_t(*s)).advance;
+    return int(pen + 0.5f);
+  }
+
+  // A controller button as a coloured disc with its letter, then a label. Returns the width used.
+  int Button(int x, int y, const char* letter, uint32_t disc, const char* label, uint32_t colour) {
+    Circle(x + 13, y + 13, 13, disc);
+    const int w = Width(letter, 18);
+    Text(x + 13 - w / 2, y + 3, letter, Rgba(255, 255, 255, 255), 18);
+    return 32 + Text(x + 32, y + 2, label, colour, 20) + 26;
+  }
+};
+
+void Render(uint32_t* pixels, uint32_t width, uint32_t height) {
+  std::memset(pixels, 0, size_t(width) * height * 4);
+  Canvas c{pixels, width, height};
+  const uint32_t card = Canvas::Rgba(18, 26, 40, 240), header = Canvas::Rgba(44, 120, 64, 255);
+  const uint32_t white = Canvas::Rgba(245, 247, 250, 255), grey = Canvas::Rgba(165, 178, 196, 255);
+  const uint32_t gold = Canvas::Rgba(250, 214, 96, 255);
+  const int W = int(width), H = int(height);
+  if (!open && !Shoulders()) {  // from start, on the game's main menu: where the language is
+    const char* label = SIMS3_CHEATS ? "Language and cheats" : "Language";
+    const int w = 32 + c.Width("Hold", 20) + 10 + 26 + 10 + c.Width(label, 20) + 32, x = 40, y = H - 92;
+    c.Round(x, y, x + w, y + 50, 14, card);
+    int tx = x + 16;
+    tx += c.Text(tx, y + 13, "Hold", grey, 20) + 10;
+    c.Circle(tx + 13, y + 25, 13, Canvas::Rgba(90, 104, 128, 255));
+    c.Text(tx + 13 - c.Width("-", 22) / 2, y + 12, "-", white, 22);
+    tx += 26 + 10;
+    c.Text(tx, y + 13, label, white, 20);
+    return;
+  }
+  if (!open) {  // the shoulder buttons are being held: a small note at the bottom
+    const char* note = "Cheats requested: now press  +  to open the pause menu";
+    const int w = c.Width(note, 22) + 48, x = (W - w) / 2;
+    c.Round(x, H - 96, x + w, H - 46, 14, card);
+    c.Text(x + 24, H - 84, note, white, 22);
+    return;
+  }
+  c.Fill(0, 0, W, H, Canvas::Rgba(0, 0, 0, 120));  // the game, dimmed
+  const int x0 = (W - 860) / 2, y0 = (H - 600) / 2, x1 = x0 + 860, y1 = y0 + 600;
+  c.Round(x0 - 3, y0 - 3, x1 + 3, y1 + 3, 22, Canvas::Rgba(80, 200, 100, 255));
+  c.Round(x0, y0, x1, y1, 20, card);
+  c.Round(x0, y0, x1, y0 + 70, 20, header);
+  c.Fill(x0, y0 + 50, x1, y0 + 70, header);
+  c.Text(x0 + 30, y0 + 14, "Menu", white, 38);
+  c.Text(x1 - 30 - c.Width("Sims3-NX", 20), y0 + 26, "Sims3-NX", Canvas::Rgba(210, 240, 215, 255), 20);
+
+  const std::string language_text = std::string("Language:   <  ") + kLanguages[language.load()].name + "  >";
+  const char* language_note = restart_failed                        ? "Saved: restart the game to apply"
+                              : language != running_language       ? "A: restart in this language (save first!)"
+                                                                    : "Left / Right to change";
+  const char* const kItemText[3] = {"Turn cheats on", language_text.c_str(), "Close"};
+  const char* const kItemNote[3] = {"Then press  +  : the pause menu asks to confirm", language_note, ""};
+  int y = y0 + 92;
+  for (int row = 0; row < kItems; ++row) {
+    const int i = row + kFirst;
+    const bool on = Item() == i;
+    c.Round(x0 + 24, y, x1 - 24, y + 52, 12, on ? Canvas::Rgba(52, 128, 74, 255) : Canvas::Rgba(30, 42, 60, 255));
+    if (on) c.Round(x0 + 24, y, x0 + 32, y + 52, 4, gold);
+    c.Text(x0 + 48, y + 12, kItemText[i], white, 26);
+    if (*kItemNote[i] && (i != 1 || on || language != running_language || restart_failed)) {
+      c.Text(x1 - 44 - c.Width(kItemNote[i], 18), y + 17, kItemNote[i],
+             on ? Canvas::Rgba(215, 240, 220, 255) : grey, 18);
+    }
+    y += 62;
+  }
+
+  y += 4;
+#if SIMS3_CHEATS
+  c.Text(x0 + 32, y, "Before turning cheats on", gold, 22);
+  y += 32;
+  static const char* const kBefore[] = {
+      "The game checks in its pause menu (+): choose this, then press +.",
+      "It then asks to confirm (achievements are turned off) and offers to save.",
+  };
+  for (const char* line : kBefore) {
+    c.Text(x0 + 32, y, line, white, 20);
+    y += 27;
+  }
+  y += 10;
+  c.Text(x0 + 32, y, "Once cheats are on", gold, 22);
+  y += 32;
+  static const char* const kAfter[] = {
+      "Buy mode > Decor > Miscellaneous: Spoot the llama. Place it and select it for",
+      "Kaching, Motherlode, lifetime happiness, karma and unlocking all rewards.",
+      "Drag a Sim's need and skill bars to set them. Mailboxes get extra options.",
+  };
+  for (const char* line : kAfter) {
+    c.Text(x0 + 32, y, line, white, 20);
+    y += 27;
+  }
+#else
+  c.Text(x0 + 32, y, "Language", gold, 22);
+  y += 32;
+  c.Text(x0 + 32, y, "Pick one with Left / Right, then A: the game restarts in it.", white, 20);
+  y += 27;
+  c.Text(x0 + 32, y, "Save your game first. The choice is kept in sims3.toml.", white, 20);
+#endif
+
+  int x = x0 + 32;
+  const int fy = y1 - 50;
+  c.Fill(x0 + 24, fy - 14, x1 - 24, fy - 13, Canvas::Rgba(60, 74, 96, 255));
+  x += c.Text(x, fy + 2, "Up / Down", grey, 20) + 26;
+  x += c.Button(x, fy, "A", Canvas::Rgba(76, 175, 80, 255), "Select", white);
+  x += c.Button(x, fy, "B", Canvas::Rgba(220, 70, 60, 255), "Close", white);
+  c.Text(x, fy + 2, "Tap  -  for the game's Back", grey, 20);
+}
+}  // namespace cheat_menu
+
+extern "C" uint64_t Sims3CheatPad(uint64_t held) { return cheat_menu::Pad(held); }
+extern "C" int Sims3CheatShoulders(void) { return cheat_menu::Shoulders() ? 1 : 0; }
+
 namespace sims3 {
 namespace {
 
@@ -65,6 +483,33 @@ namespace clocks {
 uint32_t cap_fps = 30;
 u64 last_present = 0;
 
+u64 started = 0;
+bool reported_later = false;
+
+// What an overclock tool sees and does: the program id it matches profiles against, and the clocks in force.
+void Report(const char* when) {
+  u64 program = 0;
+  svcGetInfo(&program, InfoType_ProgramId, CUR_PROCESS_HANDLE, 0);
+  u32 cpu = 0, gpu = 0, mem = 0;
+  if (R_SUCCEEDED(clkrstInitialize())) {
+    const struct {
+      PcvModuleId module;
+      u32* hz;
+    } kModules[] = {{PcvModuleId_CpuBus, &cpu}, {PcvModuleId_GPU, &gpu}, {PcvModuleId_EMC, &mem}};
+    for (const auto& m : kModules) {
+      ClkrstSession session;
+      if (R_SUCCEEDED(clkrstOpenSession(&session, m.module, 3))) {
+        clkrstGetClockRate(&session, m.hz);
+        clkrstCloseSession(&session);
+      }
+    }
+    clkrstExit();
+  }
+  REXLOG_INFO("[clock] {}: program id {:016X}, CPU {} MHz, GPU {} MHz, memory {} MHz (0 = could not read)", when,
+              program, cpu / 1000000, gpu / 1000000, mem / 1000000);
+  if (!started) started = armGetSystemTick();
+}
+
 void Start() {
   if (FILE* f = std::fopen((rex::filesystem::GetExecutableFolder() / "fps.txt").string().c_str(), "r")) {
     int c = 30;
@@ -72,6 +517,7 @@ void Start() {
     std::fclose(f);
   }
   REXLOG_INFO("[clock] fps cap {}", cap_fps);
+  Report("at start");
 }
 
 void Stop() {}
@@ -79,6 +525,10 @@ void Stop() {}
 // Before each present.
 void Pace() {
   const u64 now = armGetSystemTick();
+  if (!reported_later && started && armTicksToNs(now - started) > 30000000000ull) {
+    reported_later = true;
+    Report("after 30 s");
+  }
   if (cap_fps && last_present) {
     // 1.5 ms early: the flip itself waits for the next vertical blank.
     const u64 frame = armNsToTicks(1000000000ull / cap_fps - 1500000ull);
@@ -1440,6 +1890,7 @@ class Deko3dPresenter {
 
   // The picture is whatever the game resolved to the front buffer, or the main target if it did not.
   void Present(uint32_t front_address) {
+    PrepareOverlay();
     uint32_t source = 0;
     Surface* front = FindSurface(front_address);
     if (front && !front->depth) {
@@ -1469,6 +1920,7 @@ class Deko3dPresenter {
       slot_ = queue_.acquireImage(swapchain_);
       dk::ImageView target{images_[slot_]};
       Blit(source, target, kWidth, kHeight, 0, 0, 0, 0, kWidth, kHeight, swapped ? 2 : 0);
+      DrawOverlay(target);
       if (frame_used_ > blit_start) {
         frame_memory_.flushCpuCache(uint32_t(blit_start), uint32_t(frame_used_ - blit_start));
       }
@@ -1476,6 +1928,7 @@ class Deko3dPresenter {
       queue_.signalFence(frame_fences_[slot_index_], true);
       fence_pending_[slot_index_] = true;
       clocks::Pace();
+      PokeCheats();
       queue_.presentImage(swapchain_, slot_);
     }
     rare_draws_.clear();
@@ -1485,6 +1938,116 @@ class Deko3dPresenter {
     for (auto& surface : retired_) slot_retired_[slot_index_].push_back(std::move(surface));
     retired_.clear();
     open_ = false;
+  }
+
+  /*
+   * "Turn cheats on" (cheat_menu). The game's UI layer (sub_8871EFA8, a Scaleform event handler) keeps the four
+   * cheat buttons' held state as bits 0x3C of the word at 0x89306780: key down sets a bit, key up clears it. On every
+   * UI event it passes, if all four are set, it clears the word and calls the C# callback stored at 0x89306784
+   * (ChallengesManager.RequestEnableCheatingCallback, registered through
+   * Scaleform_SetRequestEnableCheatsCallback), which shows the confirmation. The handler belongs to the
+   * Pause_Menu component (factory hash 0xCBFFD75D = FNV-1 of "pause_menu"), so it only runs while the pause menu is up. The four held buttons did not reach it
+   * on the Switch, so the bits are set here and the next UI event (the short button hold) fires it.
+   */
+  static constexpr uint32_t kCheatHeld = 0x89306780, kCheatCallback = 0x89306784;
+  int cheat_watch_ = 0;
+  uint32_t Guest32(uint32_t address) {
+    uint32_t value;
+    std::memcpy(&value, cheat_menu::guest_memory.load()->TranslateVirtual<uint8_t*>(address), 4);
+    return __builtin_bswap32(value);
+  }
+  void PokeCheats() {
+    if (!cheat_menu::guest_memory.load()) return;
+    if (cheat_menu::enable_request.exchange(false)) {
+      const uint32_t held = Guest32(kCheatHeld), callback = Guest32(kCheatCallback);
+      REXLOG_INFO("[cheats] combination bits {:08X}, callback {:08X} (0 = not registered: load a household first)",
+                  held, callback);
+      const uint32_t set = __builtin_bswap32(held | 0x3C);
+      std::memcpy(cheat_menu::guest_memory.load()->TranslateVirtual<uint8_t*>(kCheatHeld), &set, 4);
+      cheat_watch_ = 1;
+    } else if (cheat_watch_ > 0) {
+      const uint32_t held = Guest32(kCheatHeld);
+      if ((held & 0x3C) == 0) {
+        REXLOG_INFO("[cheats] the game took the request after {} frames", cheat_watch_);
+        cheat_watch_ = 0;
+      } else if ((held & 0x3C) != 0x3C) {
+        REXLOG_WARN("[cheats] a key-up cleared the bits ({:08X}) before the check fired", held);
+        cheat_watch_ = 0;
+      } else if (++cheat_watch_ == 300) {
+        REXLOG_WARN("[cheats] waiting: the check runs in the pause menu (+); still armed");
+        cheat_watch_ = 0;
+      }
+    }
+  }
+
+  // The cheat menu (cheat_menu above): drawn on the CPU at full size into one of two buffers, copied into an image
+  // when it changes, and blended over the presented frame at full size.
+  static constexpr uint32_t kOverlayWidth = kWidth, kOverlayHeight = kHeight;  // full size: crisp text
+  static constexpr uint32_t kOverlayBytes = kOverlayWidth * kOverlayHeight * 4;
+
+  void PrepareOverlay() {
+    const uint64_t key = cheat_menu::Key();
+    overlay_show_ = key != 0;
+    if (!overlay_show_ || key == overlay_key_) return;
+    if (!overlay_pixels_) {
+      const uint32_t bytes = (kOverlayBytes * 2 + DK_MEMBLOCK_ALIGNMENT - 1) & ~uint32_t(DK_MEMBLOCK_ALIGNMENT - 1);
+      overlay_pixels_ =
+          dk::MemBlockMaker{device_, bytes}.setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached).create();
+      MakeImage(DkImageFormat_RGBA8_Unorm, kOverlayWidth, kOverlayHeight, overlay_memory_, overlay_image_);
+      dk::ImageView view{overlay_image_};
+      overlay_descriptor_ = NewDescriptor(view);
+    }
+    overlay_key_ = key;
+    overlay_buffer_ ^= 1;
+    auto* pixels = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(overlay_pixels_.getCpuAddr()) +
+                                               size_t(overlay_buffer_) * kOverlayBytes);
+    cheat_menu::Render(pixels, kOverlayWidth, kOverlayHeight);
+    overlay_dirty_ = true;
+  }
+
+  void DrawOverlay(const dk::ImageView& dest) {
+    if (!overlay_show_) {
+      overlay_key_ = 0;  // drawn again in full when it comes back
+      return;
+    }
+    if (overlay_dirty_) {
+      overlay_dirty_ = false;
+      dk::ImageView view{overlay_image_};
+      commands_.copyBufferToImage(
+          DkCopyBuf{overlay_pixels_.getGpuAddr() + uint64_t(overlay_buffer_) * kOverlayBytes, 0, 0}, view,
+          DkImageRect{0, 0, 0, kOverlayWidth, kOverlayHeight, 1});
+    }
+    Arena block = Allocate(256, DK_UNIFORM_BUF_ALIGNMENT);
+    if (!block.cpu) return;
+    const float data[8] = {-1.0f, 1.0f, 1.0f, -1.0f, 0.0f, 0.0f, float(kOverlayWidth), float(kOverlayHeight)};
+    const int32_t modes[4] = {0, 0, 0, 0};
+    std::memcpy(block.cpu, data, sizeof(data));
+    std::memcpy(block.cpu + sizeof(data), modes, sizeof(modes));
+    commands_.barrier(DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_Descriptors);
+    commands_.bindRenderTargets(&dest);
+    commands_.setViewports(0, {DkViewport{0.0f, 0.0f, float(kWidth), float(kHeight), 0.0f, 1.0f}});
+    commands_.setScissors(0, {DkScissor{0, 0, kWidth, kHeight}});
+    commands_.bindShaders(DkStageFlag_GraphicsMask, {&blit_vertex_, &blit_fragment_});
+    commands_.bindRasterizerState(dk::RasterizerState{}.setCullMode(DkFace_None));
+    commands_.bindVtxAttribState({});
+    commands_.bindVtxBufferState({});
+    commands_.bindColorState(dk::ColorState{}.setBlendEnable(0, true));
+    commands_.bindBlendStates(0, {dk::BlendState{}
+                                      .setOps(DkBlendOp_Add, DkBlendOp_Add)
+                                      .setFactors(DkBlendFactor_SrcAlpha, DkBlendFactor_InvSrcAlpha,
+                                                  DkBlendFactor_Zero, DkBlendFactor_One)});
+    commands_.bindColorWriteState(dk::ColorWriteState{}.setMask(0, DkColorMask_RGBA));
+    commands_.bindDepthStencilState(dk::DepthStencilState{}.setDepthTestEnable(false).setDepthWriteEnable(false));
+    commands_.bindUniformBuffer(DkStage_Vertex, 0, block.gpu, 256);
+    commands_.bindUniformBuffer(DkStage_Fragment, 0, block.gpu, 256);
+    commands_.bindTextures(DkStage_Fragment, 0, {dkMakeTextureHandle(overlay_descriptor_, 0)});
+    pixel_bound_[0] = ~0u;
+    commands_.draw(DkPrimitive_TriangleStrip, 4, 1, 0, 0);
+    commands_.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
+    commands_.bindColorState(dk::ColorState{});
+    blend_valid_ = false;
+    current_colour_ = current_depth_ = nullptr;
+    program_ = Program::kNone;
   }
 
   void ReleaseRetired(uint32_t slot) {
@@ -2587,6 +3150,11 @@ class Deko3dPresenter {
   size_t flushed_used_ = 0;
   uint32_t chunk_draws_ = 0, chunks_ = 0, flushes_ = 0;
   std::deque<std::string> recent_;
+  dk::UniqueMemBlock overlay_pixels_, overlay_memory_;
+  dk::Image overlay_image_;
+  uint32_t overlay_descriptor_ = 0, overlay_buffer_ = 0;
+  uint64_t overlay_key_ = 0;
+  bool overlay_show_ = false, overlay_dirty_ = false;
   dk::Shader blit_vertex_, blit_fragment_, blit_depth_fragment_, blit_stencil_fragment_, stencil_bit_fragment_;
   dk::UniqueMemBlock xenos_memory_, frame_memory_, cube_memory_, safe_memory_, vertex_cache_memory_;
   size_t vertex_cache_used_ = 0;
@@ -2645,6 +3213,7 @@ class Deko3dGraphicsSystem final : public rex::system::IGraphicsSystem {
     dispatcher_ = dispatcher;
     kernel_state_ = kernel_state;
     memory_ = dispatcher->memory();
+    cheat_menu::guest_memory = memory_;
     if (!mmio_registered_) {
       mmio_registered_ =
           memory_->AddVirtualMappedRange(kMmioBase, kMmioMask, kMmioSize, this, &MmioRead, &MmioWrite);

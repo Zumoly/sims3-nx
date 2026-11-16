@@ -60,6 +60,9 @@ def main():
     if len(sys.argv) == 3:
         print("Title update (%s):" % sys.argv[2])
         good &= check(sys.argv[2], UPDATE)
+        if os.path.exists(os.path.join(sys.argv[2], "default.xexp")):
+            print("  %-34s REMOVE IT: the game will not start with this file in update/" % "default.xexp")
+            good = False
     print("\nAll good." if good else "\nSome files do not match: see above.")
     return 0 if good else 1
 

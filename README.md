@@ -37,8 +37,9 @@ are drawn directly with the Switch GPU's own API, [deko3d](https://github.com/de
    ```
 
    It checks every file and tells you if the package is a different version. Copy the contents of the `update`
-   folder it made (`globalpatch.idx`, `Sims3.xexp`, `PrivLoader.xexp`, `default.xexp` and `GameplayRelease/`) to
-   `sdmc:/switch/Sims3/update/`.
+   folder it made (`globalpatch.idx`, `Sims3.xexp`, `PrivLoader.xexp` and `GameplayRelease/`) to
+   `sdmc:/switch/Sims3/update/`. **Do not copy `default.xexp`**: the script leaves it out on purpose, and the game
+   will not start if it is in `update/`.
 4. Optional but useful: check your files before copying them to the card.
 
    ```
@@ -60,7 +61,7 @@ sdmc:/switch/Sims3/
 │   ├── PrivLoader.xex
 │   ├── GameData/  GameplayRelease/  UI/  ...
 ├── update/                 Title Update 1, from extract_tu.py
-│   ├── globalpatch.idx  Sims3.xexp  PrivLoader.xexp  default.xexp
+│   ├── globalpatch.idx  Sims3.xexp  PrivLoader.xexp     (no default.xexp)
 │   └── GameplayRelease/
 └── logs/                   written by the port (attach the latest one to bug reports)
 ```
@@ -95,6 +96,12 @@ Known issues:
 - Outfit thumbnails can glitch the first time a category is opened.
 - Returning to the main menu from a game can crash.
 - Some interface elements (skill bars) show small drawing errors.
+
+### Troubleshooting
+
+- **The game closes right after launch**, and the log says `XEX patch image key doesn't match original XEX!` for
+  `default.xexp`: delete `sdmc:/switch/Sims3/update/default.xexp`. If the log names `Sims3.xexp` instead, your disc
+  or title update is a different version; run `tools/check_game.py` to see which file differs.
 
 Bug reports are welcome in [Issues](../../issues): include the latest log from `sdmc:/switch/Sims3/logs/`, a
 screenshot, and what you were doing.

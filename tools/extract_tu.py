@@ -16,12 +16,17 @@ import sys
 
 # SHA-256 of each file of Title Update 1 for media ID 21CDDF46.
 EXPECTED = {
-    "default.xexp": "a5707d9615783b1629efcd912e6eab3e2b3414a0c1dc00e635d31aab9306a86a",
     "globalpatch.idx": "7e9ecb1955f9fd82f4b09b69eb0ec2cf8874b85f6b2c5fe8fa3a7c6af49ca92b",
     "PrivLoader.xexp": "39081ad344b5b22ed10e7cb432b3785a9c8dbabcca314d24a42ad404af6aa6f0",
     "Sims3.xexp": "e141effed399bdc4d6702c428cc5e7a65a53a16fd8584abbe8b872358de0a952",
     "GameplayRelease/gameplay.package": "452edc0373bd3e0cf8921633be5597d3d6bcd2ab81d9646bfdaf2e4388ba71f7",
     "GameplayRelease/scripts.package": "45668add593b2a014866badeb47d5b7d36c65a1320d02557623ae8015de904bd",
+}
+
+# Files of the package Sims3-NX must NOT get: the port's default.xex code is built from the unpatched disc file, and
+# with default.xexp present the game refuses to start ("XEX patch image key doesn't match original XEX").
+SKIP = {
+    "default.xexp": "a5707d9615783b1629efcd912e6eab3e2b3414a0c1dc00e635d31aab9306a86a",
 }
 
 BLOCK = 0x1000
@@ -80,6 +85,12 @@ def main():
         if e["dir"]:
             continue
         rel = path(i)
+        if rel in SKIP:
+            print("%-36s %10d bytes  skipped (not used by Sims3-NX)" % (rel, e["size"]))
+            stale = os.path.join(out, *rel.split("/"))
+            if os.path.isfile(stale):
+                os.remove(stale)
+            continue
         blob = bytearray()
         for b in range(e["start"], e["start"] + (e["size"] + BLOCK - 1) // BLOCK):
             blob += data[offset(b):offset(b) + BLOCK]

@@ -55,6 +55,7 @@ The final layout on the SD card:
 sdmc:/switch/Sims3/
 ├── sims3.nro
 ├── fps.txt                 (optional, see below)
+├── sims3.toml              (optional, game language, see below)
 ├── game/                   your extracted disc
 │   ├── default.xex
 │   ├── Sims3.xex
@@ -85,6 +86,25 @@ use clock speeds your console and your overclock tool support; overclocking is a
 
 The frame rate is capped at **30 fps** for smoother pacing. To change the cap, put a file named `fps.txt` next to
 `sims3.nro` holding a number: `30` (default), `60`, or `0` for no cap.
+
+## Language
+
+The game uses the language of the (emulated) Xbox 360 system settings, English by default. To change it, create a
+text file named `sims3.toml` next to `sims3.nro` with one line, for example for French:
+
+```
+user_language = 4
+```
+
+| Language | Value |
+| --- | --- |
+| English (default) | 1 |
+| German | 3 |
+| French | 4 |
+| Spanish | 5 |
+| Italian | 6 |
+
+The disc also has Dutch, but the Xbox 360 had no Dutch system language, so this setting cannot select it.
 
 ## Status
 
